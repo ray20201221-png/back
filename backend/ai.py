@@ -1,29 +1,35 @@
-import requests
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
+import os
+import google.generativeai as genai
 
-MODEL = "llama3.2"
+# Gemini API Key
+genai.configure(
+    api_key=os.getenv("AIzaSyDCe7OkatnnPUaj_VtgY8XYgFKW-8lJJtg")
+)
 
+# 模型
+model = genai.GenerativeModel(
+    "gemini-1.5-flash"
+)
+
+# AI 聊天
 def ask_ai(messages):
 
     try:
 
-        res = requests.post(
+        prompt = ""
 
-            OLLAMA_URL,
+        for msg in messages:
 
-            json={
-                "model": MODEL,
-                "messages": messages,
-                "stream": False
-            }
+            role = msg["role"]
+            content = msg["content"]
 
-        )
+            prompt += f"{role}: {content}\n"
 
-        data = res.json()
+        response = model.generate_content(prompt)
 
-        return data["message"]["content"]
+        return response.text
 
     except Exception as e:
 
-        return f"❌ AI Error: {str(e)}"
+        return f"❌ Gemini Error: {str(e)}"
