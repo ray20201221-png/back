@@ -9,7 +9,7 @@ genai.configure(
 )
 
 # Gemini 模型
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-pro")
 
 
 # =====================
