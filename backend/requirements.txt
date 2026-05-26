@@ -3,5 +3,5 @@ uvicorn
 requests
 sqlalchemy
 python-multipart
-google-genai
+google-generativeai
 pyjwt
