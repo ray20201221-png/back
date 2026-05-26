@@ -1,27 +1,44 @@
-from jose import jwt
-from passlib.context import CryptContext
+import hashlib
+import jwt
+import datetime
 
-SECRET_KEY = "RUI_SECRET"
-
+# ⚠️ 你可以自己改這個密鑰（很重要）
+SECRET_KEY = "rui-ai-secret-key"
 ALGORITHM = "HS256"
 
-pwd_context = CryptContext(
-    schemes=["bcrypt"],
-    deprecated="auto"
-)
 
-def hash_password(password):
+# =========================
+# 密碼加密（SHA256）
+# =========================
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
-    return pwd_context.hash(password)
 
-def verify_password(password, hashed):
+# =========================
+# 密碼驗證
+# =========================
+def verify_password(password: str, hashed: str) -> bool:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest() == hashed
 
-    return pwd_context.verify(password, hashed)
 
-def create_token(data):
+# =========================
+# 建立 Token（JWT）
+# =========================
+def create_token(data: dict):
+    payload = data.copy()
 
-    return jwt.encode(
-        data,
-        SECRET_KEY,
-        algorithm=ALGORITHM
-    )
+    payload["exp"] = datetime.datetime.utcnow() + datetime.timedelta(days=7)
+
+    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+    return token
+
+
+# =========================
+# 解碼 Token（未來可用）
+# =========================
+def decode_token(token: str):
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except:
+        return None
