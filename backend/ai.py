@@ -11,7 +11,7 @@ genai.configure(
 # =====================
 # 模型（免費穩定版）
 # =====================
-model = genai.GenerativeModel("gemini-1.5-pro")
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 
 # =====================
