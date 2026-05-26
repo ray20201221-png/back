@@ -3,7 +3,5 @@ uvicorn
 requests
 sqlalchemy
 python-multipart
-passlib[bcrypt]
-python-jose
 google-generativeai
 pyjwt
