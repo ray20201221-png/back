@@ -8,8 +8,10 @@ genai.configure(
     api_key=os.getenv("AIzaSyDCe7OkatnnPUaj_VtgY8XYgFKW-8lJJtg")
 )
 
-# Gemini 模型
-model = genai.GenerativeModel("gemini-pro")
+# =====================
+# 模型（免費穩定版）
+# =====================
+model = genai.GenerativeModel("gemini-1.5-pro")
 
 
 # =====================
@@ -17,7 +19,6 @@ model = genai.GenerativeModel("gemini-pro")
 # =====================
 def ask_ai(messages):
     try:
-        # 把 chat history 轉成 Gemini prompt
         prompt = ""
 
         for msg in messages:
@@ -31,7 +32,6 @@ def ask_ai(messages):
             else:
                 prompt += f"AI: {content}\n"
 
-        # 呼叫 Gemini
         response = model.generate_content(prompt)
 
         return response.text
