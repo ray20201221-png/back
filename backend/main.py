@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session
 from ai import ask_ai
 from auth import create_token, decode_token, hash_password, verify_password
 from database import SessionLocal, engine
-from models import Base, Message, User
-from rag import KNOWLEDGE_DIR, rag_context, rebuild_index
+from models import Base, Conversation, Message, User
+from rag import KNOWLEDGE_DIR, MIN_CONFIDENCE, rag_context, rebuild_index
 
 
 Base.metadata.create_all(bind=engine)
@@ -27,14 +27,30 @@ app.add_middleware(
 BACKEND_DIR = Path(__file__).resolve().parent
 READABLE_CODE_EXTENSIONS = {".py", ".txt", ".md"}
 user_histories = {}
+active_conversations = {}
 MEMORY_LIMIT = 20
+SMALL_TALK = {
+    "hi",
+    "hello",
+    "hey",
+    "你好",
+    "嗨",
+    "哈囉",
+    "謝謝",
+    "thanks",
+    "thank you",
+}
 
 
 def ensure_columns():
     with engine.connect() as conn:
-        columns = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()]
-        if "is_admin" not in columns:
+        user_columns = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()]
+        if "is_admin" not in user_columns:
             conn.exec_driver_sql("ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0")
+
+        message_columns = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(messages)").fetchall()]
+        if "conversation_id" not in message_columns:
+            conn.exec_driver_sql("ALTER TABLE messages ADD COLUMN conversation_id INTEGER")
         conn.commit()
 
 
@@ -108,12 +124,15 @@ def admin_user(user: User = Depends(current_user)):
 
 
 def load_user_memory(user: User, db: Session):
-    if user.username in user_histories:
-        return user_histories[user.username]
+    conversation = get_active_conversation(user, db)
+    key = (user.id, conversation.id)
+    if key in user_histories:
+        return user_histories[key]
 
     stored_messages = (
         db.query(Message)
         .filter(Message.user_id == user.id)
+        .filter(Message.conversation_id == conversation.id)
         .order_by(Message.id.desc())
         .limit(MEMORY_LIMIT)
         .all()
@@ -123,8 +142,84 @@ def load_user_memory(user: User, db: Session):
         {"role": message.role, "content": message.content}
         for message in reversed(stored_messages)
     ]
-    user_histories[user.username] = session
+    user_histories[key] = session
     return session
+
+
+def migrate_legacy_conversation(user: User, db: Session):
+    legacy_messages = (
+        db.query(Message)
+        .filter(Message.user_id == user.id)
+        .filter(Message.conversation_id.is_(None))
+        .order_by(Message.id)
+        .all()
+    )
+    if not legacy_messages:
+        return None
+
+    title = legacy_messages[0].content[:30] or "Previous chat"
+    conversation = Conversation(user_id=user.id, title=title)
+    db.add(conversation)
+    db.flush()
+
+    for message in legacy_messages:
+        message.conversation_id = conversation.id
+
+    db.commit()
+    return conversation
+
+
+def get_active_conversation(user: User, db: Session):
+    if user.id in active_conversations:
+        conversation = (
+            db.query(Conversation)
+            .filter(Conversation.id == active_conversations[user.id])
+            .filter(Conversation.user_id == user.id)
+            .first()
+        )
+        if conversation:
+            return conversation
+
+    legacy = migrate_legacy_conversation(user, db)
+    conversation = legacy or (
+        db.query(Conversation)
+        .filter(Conversation.user_id == user.id)
+        .order_by(Conversation.id.desc())
+        .first()
+    )
+
+    if not conversation:
+        conversation = Conversation(user_id=user.id, title="New chat")
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+    active_conversations[user.id] = conversation.id
+    return conversation
+
+
+def serialize_message(message: Message):
+    return {
+        "id": message.id,
+        "role": message.role,
+        "content": message.content,
+    }
+
+
+def should_enforce_rag_threshold(message: str):
+    normalized = message.strip().lower()
+    if normalized in SMALL_TALK:
+        return False
+    return True
+
+
+def low_confidence_reply(rag: dict):
+    return (
+        "我目前沒有足夠可靠的知識庫資料可以回答這個問題，所以先不硬猜。\n\n"
+        f"目前信心分數：{rag['confidence']}\n"
+        f"門檻分數：{rag['min_confidence']}\n\n"
+        "你可以把相關資料放進 `backend/knowledge/`，或換一個更具體的問法。"
+    )
 
 
 @app.post("/register")
@@ -171,12 +266,30 @@ def chat(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
+    conversation = get_active_conversation(user, db)
     session = load_user_memory(user, db)
 
     session.append({"role": "user", "content": req.message})
-    db.add(Message(role="user", content=req.message, user_id=user.id))
+    if conversation.title == "New chat":
+        conversation.title = req.message[:30]
+    db.add(Message(role="user", content=req.message, user_id=user.id, conversation_id=conversation.id))
 
     rag = rag_context(req.message)
+    if should_enforce_rag_threshold(req.message) and not rag["passed"]:
+        reply = low_confidence_reply(rag)
+        session.append({"role": "assistant", "content": reply})
+        db.add(Message(role="assistant", content=reply, user_id=user.id, conversation_id=conversation.id))
+        db.commit()
+        user_histories[(user.id, conversation.id)] = session
+        return {
+            "reply": reply,
+            "sources": rag["sources"],
+            "confidence": rag["confidence"],
+            "min_confidence": rag["min_confidence"],
+            "refused": True,
+            "conversation_id": conversation.id,
+        }
+
     system_prompt = """
 You are RUI AI. Answer clearly and kindly in Traditional Chinese.
 If RAG context is available, use it as the primary source.
@@ -201,18 +314,88 @@ If the context is insufficient, say what is missing and then provide a careful g
         reply = f"{reply}\n\nSources:\n{source_text}"
 
     session.append({"role": "assistant", "content": reply})
-    db.add(Message(role="assistant", content=reply, user_id=user.id))
+    db.add(Message(role="assistant", content=reply, user_id=user.id, conversation_id=conversation.id))
     db.commit()
 
-    user_histories[user.username] = session
+    user_histories[(user.id, conversation.id)] = session
 
-    return {"reply": reply, "sources": rag["sources"]}
+    return {
+        "reply": reply,
+        "sources": rag["sources"],
+        "confidence": rag["confidence"],
+        "min_confidence": rag["min_confidence"],
+        "refused": False,
+        "conversation_id": conversation.id,
+    }
 
 
 @app.post("/clear")
-def clear(user: User = Depends(current_user)):
-    user_histories[user.username] = []
-    return {"message": "cleared"}
+def clear(
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    conversation = Conversation(user_id=user.id, title="New chat")
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+
+    active_conversations[user.id] = conversation.id
+    user_histories[(user.id, conversation.id)] = []
+    return {"message": "cleared", "conversation_id": conversation.id}
+
+
+@app.get("/conversations")
+def conversations(
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    migrate_legacy_conversation(user, db)
+    rows = (
+        db.query(Conversation)
+        .filter(Conversation.user_id == user.id)
+        .order_by(Conversation.id.desc())
+        .all()
+    )
+    return [
+        {
+            "id": row.id,
+            "title": row.title or "New chat",
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "active": active_conversations.get(user.id) == row.id,
+        }
+        for row in rows
+    ]
+
+
+@app.get("/conversations/{conversation_id}/messages")
+def conversation_messages(
+    conversation_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    conversation = (
+        db.query(Conversation)
+        .filter(Conversation.id == conversation_id)
+        .filter(Conversation.user_id == user.id)
+        .first()
+    )
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    active_conversations[user.id] = conversation.id
+
+    messages = (
+        db.query(Message)
+        .filter(Message.user_id == user.id)
+        .filter(Message.conversation_id == conversation.id)
+        .order_by(Message.id)
+        .all()
+    )
+    user_histories[(user.id, conversation.id)] = [
+        {"role": message.role, "content": message.content}
+        for message in messages[-MEMORY_LIMIT:]
+    ]
+    return [serialize_message(message) for message in messages]
 
 
 @app.get("/admin/users")
@@ -291,6 +474,7 @@ def admin_rag_status(_: User = Depends(admin_user)):
         "knowledge_dir": str(KNOWLEDGE_DIR),
         "files": files,
         "file_count": len(files),
+        "min_confidence": MIN_CONFIDENCE,
     }
 
 

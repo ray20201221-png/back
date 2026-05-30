@@ -1,4 +1,5 @@
 import math
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ CHUNK_SIZE = 900
 CHUNK_OVERLAP = 160
 RETRIEVE_TOP_K = 12
 RERANK_TOP_K = 5
+MIN_CONFIDENCE = float(os.getenv("RAG_MIN_CONFIDENCE", "1.2"))
 
 
 @dataclass
@@ -186,10 +188,14 @@ def rag_context(question: str) -> dict:
     hyde_answer = generate_hypothetical_answer(question)
     candidates = retrieve(question, hyde_answer)
     reranked = rerank(question, candidates)
+    confidence = reranked[0].score if reranked else 0.0
 
     return {
         "hyde_answer": hyde_answer,
         "context": build_context(reranked),
+        "confidence": round(confidence, 4),
+        "min_confidence": MIN_CONFIDENCE,
+        "passed": confidence >= MIN_CONFIDENCE,
         "sources": [
             {
                 "source": item.chunk.source,
