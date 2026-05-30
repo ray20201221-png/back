@@ -9,6 +9,7 @@ from ai import ask_ai
 from auth import create_token, decode_token, hash_password, verify_password
 from database import SessionLocal, engine
 from models import Base, Message, User
+from rag import KNOWLEDGE_DIR, rag_context, rebuild_index
 
 
 Base.metadata.create_all(bind=engine)
@@ -24,7 +25,7 @@ app.add_middleware(
 )
 
 BACKEND_DIR = Path(__file__).resolve().parent
-READABLE_CODE_EXTENSIONS = {".py", ".txt"}
+READABLE_CODE_EXTENSIONS = {".py", ".txt", ".md"}
 user_histories = {}
 
 
@@ -36,7 +37,26 @@ def ensure_columns():
         conn.commit()
 
 
+def ensure_admin_user():
+    with SessionLocal() as db:
+        admin = db.query(User).filter(User.username == "admin").first()
+        if admin:
+            admin.is_admin = True
+            if not admin.password:
+                admin.password = hash_password("admin")
+        else:
+            db.add(
+                User(
+                    username="admin",
+                    password=hash_password("admin"),
+                    is_admin=True,
+                )
+            )
+        db.commit()
+
+
 ensure_columns()
+ensure_admin_user()
 
 
 def get_db():
@@ -90,7 +110,7 @@ def admin_user(user: User = Depends(current_user)):
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == req.username).first()
     if user:
-        return {"success": False, "message": "帳號已存在"}
+        return {"success": False, "message": "Username already exists"}
 
     new_user = User(
         username=req.username,
@@ -109,10 +129,10 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == req.username).first()
 
     if not user:
-        return {"success": False, "message": "帳號不存在"}
+        return {"success": False, "message": "Username not found"}
 
     if not verify_password(req.password, user.password):
-        return {"success": False, "message": "密碼錯誤"}
+        return {"success": False, "message": "Wrong password"}
 
     token = create_token({"username": user.username})
 
@@ -135,15 +155,29 @@ def chat(
     session.append({"role": "user", "content": req.message})
     db.add(Message(role="user", content=req.message, user_id=user.id))
 
+    rag = rag_context(req.message)
+    system_prompt = """
+You are RUI AI. Answer clearly and kindly in Traditional Chinese.
+If RAG context is available, use it as the primary source.
+If the context is insufficient, say what is missing and then provide a careful general answer.
+""".strip()
+
+    if rag["context"]:
+        system_prompt += f"\n\nRAG context:\n{rag['context']}"
+
     messages = [
-        {
-            "role": "system",
-            "content": "你是 RUI AI，請用清楚、友善的繁體中文回答。",
-        },
+        {"role": "system", "content": system_prompt},
         *session[-20:],
     ]
 
     reply = ask_ai(messages)
+
+    if rag["sources"]:
+        source_text = "\n".join(
+            f"- {source['source']}#{source['chunk']}"
+            for source in rag["sources"]
+        )
+        reply = f"{reply}\n\nSources:\n{source_text}"
 
     session.append({"role": "assistant", "content": reply})
     db.add(Message(role="assistant", content=reply, user_id=user.id))
@@ -151,7 +185,7 @@ def chat(
 
     user_histories[user.username] = session
 
-    return {"reply": reply}
+    return {"reply": reply, "sources": rag["sources"]}
 
 
 @app.post("/clear")
@@ -222,3 +256,24 @@ def admin_code_file(filename: str, _: User = Depends(admin_user)):
         "filename": path.name,
         "content": path.read_text(encoding="utf-8"),
     }
+
+
+@app.get("/admin/rag/status")
+def admin_rag_status(_: User = Depends(admin_user)):
+    KNOWLEDGE_DIR.mkdir(exist_ok=True)
+    files = [
+        str(path.relative_to(KNOWLEDGE_DIR))
+        for path in sorted(KNOWLEDGE_DIR.rglob("*"))
+        if path.is_file()
+    ]
+    return {
+        "knowledge_dir": str(KNOWLEDGE_DIR),
+        "files": files,
+        "file_count": len(files),
+    }
+
+
+@app.post("/admin/rag/reindex")
+def admin_rag_reindex(_: User = Depends(admin_user)):
+    rebuild_index(force=True)
+    return {"success": True, "message": "RAG index rebuilt"}
