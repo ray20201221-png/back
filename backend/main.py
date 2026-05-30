@@ -27,6 +27,7 @@ app.add_middleware(
 BACKEND_DIR = Path(__file__).resolve().parent
 READABLE_CODE_EXTENSIONS = {".py", ".txt", ".md"}
 user_histories = {}
+MEMORY_LIMIT = 20
 
 
 def ensure_columns():
@@ -106,6 +107,26 @@ def admin_user(user: User = Depends(current_user)):
     return user
 
 
+def load_user_memory(user: User, db: Session):
+    if user.username in user_histories:
+        return user_histories[user.username]
+
+    stored_messages = (
+        db.query(Message)
+        .filter(Message.user_id == user.id)
+        .order_by(Message.id.desc())
+        .limit(MEMORY_LIMIT)
+        .all()
+    )
+
+    session = [
+        {"role": message.role, "content": message.content}
+        for message in reversed(stored_messages)
+    ]
+    user_histories[user.username] = session
+    return session
+
+
 @app.post("/register")
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == req.username).first()
@@ -150,7 +171,7 @@ def chat(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    session = user_histories.get(user.username, [])
+    session = load_user_memory(user, db)
 
     session.append({"role": "user", "content": req.message})
     db.add(Message(role="user", content=req.message, user_id=user.id))
@@ -167,7 +188,7 @@ If the context is insufficient, say what is missing and then provide a careful g
 
     messages = [
         {"role": "system", "content": system_prompt},
-        *session[-20:],
+        *session[-MEMORY_LIMIT:],
     ]
 
     reply = ask_ai(messages)
