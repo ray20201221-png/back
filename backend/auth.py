@@ -18,6 +18,14 @@ def hash_password(password: str) -> str:
 # 密碼驗證
 # =========================
 def verify_password(password: str, hashed: str) -> bool:
+    if hashed.startswith("$2"):
+        try:
+            import bcrypt
+
+            return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+        except Exception:
+            return False
+
     return hashlib.sha256(password.encode("utf-8")).hexdigest() == hashed
 
 
